@@ -987,24 +987,42 @@ func (w *Wallet) VoteOnOwnedTickets(ctx context.Context, winningTicketHashes []*
 		log.Errorf("View failed: %v", errors.E(op, err))
 	}
 
-	// Remove nil votes without preserving order.
+	// Remove nil votes without preserving order. ticketHashes and
+	// usedVoteBits are parallel to votes and must be compacted with the
+	// same swaps, or the log below pairs a vote with the wrong ticket
+	// whenever at least one ticket failed to vote.
 	for i := 0; i < len(votes); {
 		if votes[i] == nil {
 			votes[i], votes[len(votes)-1] = votes[len(votes)-1], votes[i]
+			ticketHashes[i], ticketHashes[len(ticketHashes)-1] =
+				ticketHashes[len(ticketHashes)-1], ticketHashes[i]
+			usedVoteBits[i], usedVoteBits[len(usedVoteBits)-1] =
+				usedVoteBits[len(usedVoteBits)-1], usedVoteBits[i]
 			votes = votes[:len(votes)-1]
+			ticketHashes = ticketHashes[:len(ticketHashes)-1]
+			usedVoteBits = usedVoteBits[:len(usedVoteBits)-1]
 			continue
 		}
 		i++
 	}
 
 	voteRecords := make([]*udb.TxRecord, 0, len(votes))
-	for i := range votes {
+	for i := 0; i < len(votes); {
 		rec, err := udb.NewTxRecordFromMsgTx(votes[i], time.Now())
 		if err != nil {
 			log.Errorf("Failed to create transaction record: %v", err)
+			votes[i], votes[len(votes)-1] = votes[len(votes)-1], votes[i]
+			ticketHashes[i], ticketHashes[len(ticketHashes)-1] =
+				ticketHashes[len(ticketHashes)-1], ticketHashes[i]
+			usedVoteBits[i], usedVoteBits[len(usedVoteBits)-1] =
+				usedVoteBits[len(usedVoteBits)-1], usedVoteBits[i]
+			votes = votes[:len(votes)-1]
+			ticketHashes = ticketHashes[:len(ticketHashes)-1]
+			usedVoteBits = usedVoteBits[:len(usedVoteBits)-1]
 			continue
 		}
 		voteRecords = append(voteRecords, rec)
+		i++
 	}
 	w.recentlyPublishedMu.Lock()
 	for i := range voteRecords {
