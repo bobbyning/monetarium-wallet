@@ -3890,8 +3890,11 @@ func (s *Store) MakeInputSourceWithCoinType(dbtx walletdb.ReadTx, account uint32
 					continue
 				}
 
-				// Skip outputs that are not mature.
-				if opcode == opNonstake && fetchRawCreditIsCoinbase(cVal) {
+				// Skip outputs that are not mature.  Outputs of a
+				// transaction with an expiry are spendable only after
+				// coinbase maturity, like coinbase outputs.
+				if opcode == opNonstake && (fetchRawCreditIsCoinbase(cVal) ||
+					fetchRawCreditHasExpiry(cVal, DBVersion)) {
 					if !coinbaseMatured(s.chainParams, txHeight, syncHeight) {
 						continue
 					}
@@ -4724,15 +4727,21 @@ func (s *Store) AccountBalanceByCoinType(dbtx walletdb.ReadTx, minConf int32, ac
 			case opNonstake:
 				isConfirmed := confirmed(minConf, height, syncHeight)
 				creditFromCoinbase := fetchRawCreditIsCoinbase(cVal)
-				matureCoinbase := (creditFromCoinbase &&
+				creditHasExpiry := fetchRawCreditHasExpiry(cVal, DBVersion)
+
+				// Outputs with expiry require maturity like coinbase.
+				// mond enforces CoinbaseMaturity for any output with
+				// expiry set, as the full balance scan already knows.
+				requiresMaturity := creditFromCoinbase || creditHasExpiry
+				matureOutput := (requiresMaturity &&
 					coinbaseMatured(s.chainParams, height, syncHeight))
 
-				if (isConfirmed && !creditFromCoinbase) || matureCoinbase {
+				if (isConfirmed && !requiresMaturity) || matureOutput {
 					balance.Spendable += utxoAmt
 					if isSKA {
 						balance.SKASpendable = balance.SKASpendable.Add(skaAmt)
 					}
-				} else if creditFromCoinbase && !matureCoinbase {
+				} else if requiresMaturity && !matureOutput {
 					balance.ImmatureCoinbaseRewards += utxoAmt
 					if isSKA {
 						balance.SKAImmatureCoinbaseRewards = balance.SKAImmatureCoinbaseRewards.Add(skaAmt)
