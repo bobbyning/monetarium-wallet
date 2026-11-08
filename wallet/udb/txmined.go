@@ -12,15 +12,9 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/monetarium/monetarium-wallet/errors"
-	"github.com/monetarium/monetarium-wallet/internal/compat"
-	"github.com/monetarium/monetarium-wallet/wallet/txauthor"
-	"github.com/monetarium/monetarium-wallet/wallet/txrules"
-	"github.com/monetarium/monetarium-wallet/wallet/txsizes"
-	"github.com/monetarium/monetarium-wallet/wallet/walletdb"
 	"github.com/monetarium/monetarium-node/blockchain/stake"
-	"github.com/monetarium/monetarium-node/chaincfg/chainhash"
 	"github.com/monetarium/monetarium-node/chaincfg"
+	"github.com/monetarium/monetarium-node/chaincfg/chainhash"
 	"github.com/monetarium/monetarium-node/cointype"
 	"github.com/monetarium/monetarium-node/crypto/rand"
 	"github.com/monetarium/monetarium-node/crypto/ripemd160"
@@ -31,6 +25,12 @@ import (
 	"github.com/monetarium/monetarium-node/txscript/stdaddr"
 	"github.com/monetarium/monetarium-node/txscript/stdscript"
 	"github.com/monetarium/monetarium-node/wire"
+	"github.com/monetarium/monetarium-wallet/errors"
+	"github.com/monetarium/monetarium-wallet/internal/compat"
+	"github.com/monetarium/monetarium-wallet/wallet/txauthor"
+	"github.com/monetarium/monetarium-wallet/wallet/txrules"
+	"github.com/monetarium/monetarium-wallet/wallet/txsizes"
+	"github.com/monetarium/monetarium-wallet/wallet/walletdb"
 )
 
 const (
@@ -2400,11 +2400,11 @@ func (s *Store) Rollback(dbtx walletdb.ReadWriteTx, height int32) error {
 					return err
 				}
 
-				// If the credit was previously removed in the
-				// rollback, the credit amount is zero.  Only
-				// mark the previously spent credit as unspent
-				// if it still exists.
-				if amt == 0 {
+				// If the credit was removed earlier in this rollback, it
+				// no longer exists and is not put back.  An SKA credit
+				// stores 0 as its amount, so test whether the credit
+				// exists, not the amount.
+				if existsRawCredit(ns, credKey) == nil {
 					continue
 				}
 				unspentVal, err := fetchRawCreditUnspentValue(credKey)
@@ -2728,7 +2728,7 @@ func (s *Store) outputCreditInfo(ns walletdb.ReadBucket, op wire.OutPoint, block
 			Time:  blockTime,
 		},
 		Amount:       amt,
-		SKAAmount:    skaAmt,   // SKA big.Int amount for values exceeding int64
+		SKAAmount:    skaAmt, // SKA big.Int amount for values exceeding int64
 		PkScript:     pkScript,
 		Received:     receiveTime,
 		FromCoinBase: isCoinbase,
@@ -4580,11 +4580,11 @@ type CoinBalance struct {
 
 	// SKA big.Int amounts for coins that exceed int64 capacity.
 	// These are only populated for SKA coin types.
-	SKAImmatureCoinbaseRewards  cointype.SKAAmount
-	SKAImmatureStakeGeneration  cointype.SKAAmount // SKA fees distributed to stakers
-	SKASpendable                cointype.SKAAmount
-	SKATotal                    cointype.SKAAmount
-	SKAUnconfirmed              cointype.SKAAmount
+	SKAImmatureCoinbaseRewards cointype.SKAAmount
+	SKAImmatureStakeGeneration cointype.SKAAmount // SKA fees distributed to stakers
+	SKASpendable               cointype.SKAAmount
+	SKATotal                   cointype.SKAAmount
+	SKAUnconfirmed             cointype.SKAAmount
 }
 
 // Balances describes a breakdown of an account's balances in various
