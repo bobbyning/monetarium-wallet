@@ -4289,6 +4289,7 @@ func (s *Store) balanceFullScan(dbtx walletdb.ReadTx, minConf int32, syncHeight 
 			// For SKA, fetch big.Int amount from SKA amount bucket
 			skaAmt, err := fetchSKACreditAmount(ns, cKey)
 			if err != nil {
+				c.Close()
 				return nil, err
 			}
 
@@ -4496,6 +4497,7 @@ func (s *Store) balanceFullScan(dbtx walletdb.ReadTx, minConf int32, syncHeight 
 			// For SKA, fetch big.Int amount from SKA amount bucket
 			skaAmt, err := fetchSKAUnminedCreditAmount(ns, k)
 			if err != nil {
+				c.Close()
 				return nil, err
 			}
 
