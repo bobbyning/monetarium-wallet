@@ -12,15 +12,9 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/monetarium/monetarium-wallet/errors"
-	"github.com/monetarium/monetarium-wallet/internal/compat"
-	"github.com/monetarium/monetarium-wallet/wallet/txauthor"
-	"github.com/monetarium/monetarium-wallet/wallet/txrules"
-	"github.com/monetarium/monetarium-wallet/wallet/txsizes"
-	"github.com/monetarium/monetarium-wallet/wallet/walletdb"
 	"github.com/monetarium/monetarium-node/blockchain/stake"
-	"github.com/monetarium/monetarium-node/chaincfg/chainhash"
 	"github.com/monetarium/monetarium-node/chaincfg"
+	"github.com/monetarium/monetarium-node/chaincfg/chainhash"
 	"github.com/monetarium/monetarium-node/cointype"
 	"github.com/monetarium/monetarium-node/crypto/rand"
 	"github.com/monetarium/monetarium-node/crypto/ripemd160"
@@ -31,6 +25,12 @@ import (
 	"github.com/monetarium/monetarium-node/txscript/stdaddr"
 	"github.com/monetarium/monetarium-node/txscript/stdscript"
 	"github.com/monetarium/monetarium-node/wire"
+	"github.com/monetarium/monetarium-wallet/errors"
+	"github.com/monetarium/monetarium-wallet/internal/compat"
+	"github.com/monetarium/monetarium-wallet/wallet/txauthor"
+	"github.com/monetarium/monetarium-wallet/wallet/txrules"
+	"github.com/monetarium/monetarium-wallet/wallet/txsizes"
+	"github.com/monetarium/monetarium-wallet/wallet/walletdb"
 )
 
 const (
@@ -2728,7 +2728,7 @@ func (s *Store) outputCreditInfo(ns walletdb.ReadBucket, op wire.OutPoint, block
 			Time:  blockTime,
 		},
 		Amount:       amt,
-		SKAAmount:    skaAmt,   // SKA big.Int amount for values exceeding int64
+		SKAAmount:    skaAmt, // SKA big.Int amount for values exceeding int64
 		PkScript:     pkScript,
 		Received:     receiveTime,
 		FromCoinBase: isCoinbase,
@@ -3931,6 +3931,17 @@ func (s *Store) MakeInputSourceWithCoinType(dbtx walletdb.ReadTx, account uint32
 			} else {
 				// No need to filter by coin type - already reading from coin-type specific bucket
 
+				// An unmined transaction with an expiry cannot be spent
+				// while it is unmined: the mempool runs
+				// CheckTransactionInputs at nextBlockHeight with the unmined
+				// parent at mining.UnminedHeight, so blocksSincePrev is
+				// negative and the spend fails with ErrExpiryTxSpentEarly.
+				// With minConf 0 this input source is otherwise the one
+				// selection path that still returns such credits.
+				if fetchRawCreditHasExpiry(v, DBVersion) {
+					continue
+				}
+
 				// Check the account first.
 				pkScript, err = s.fastCreditPkScriptLookup(ns, nil, k)
 				if err != nil {
@@ -4583,11 +4594,11 @@ type CoinBalance struct {
 
 	// SKA big.Int amounts for coins that exceed int64 capacity.
 	// These are only populated for SKA coin types.
-	SKAImmatureCoinbaseRewards  cointype.SKAAmount
-	SKAImmatureStakeGeneration  cointype.SKAAmount // SKA fees distributed to stakers
-	SKASpendable                cointype.SKAAmount
-	SKATotal                    cointype.SKAAmount
-	SKAUnconfirmed              cointype.SKAAmount
+	SKAImmatureCoinbaseRewards cointype.SKAAmount
+	SKAImmatureStakeGeneration cointype.SKAAmount // SKA fees distributed to stakers
+	SKASpendable               cointype.SKAAmount
+	SKATotal                   cointype.SKAAmount
+	SKAUnconfirmed             cointype.SKAAmount
 }
 
 // Balances describes a breakdown of an account's balances in various
