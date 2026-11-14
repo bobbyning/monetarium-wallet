@@ -226,3 +226,95 @@ func TestSyncLastReturnedAddressDoesNotMoveCursorBack(t *testing.T) {
 			cursor)
 	}
 }
+
+// TestSyncLastReturnedAddressUsedBranchBelowLastUsed verifies that syncing a
+// child below the branch's last used child takes no update at all: only a
+// fresh branch (lastUsed == ^uint32(0)) or a child past lastUsed moves the
+// cursor. With lastUsed 10 and children up to 25 already handed out
+// (cursor 15), a sync to child 5 must leave the cursor alone — taking the
+// update would set it to child - lastUsed == 4294967291 across the wrap, and
+// the next getnewaddress would then return child 6, an address already
+// handed out (or fail with the gap-limit error, by policy).
+func TestSyncLastReturnedAddressUsedBranchBelowLastUsed(t *testing.T) {
+	ctx := context.Background()
+	cfg := basicWalletConfig
+	w, teardown := testWallet(ctx, t, &cfg, nil)
+	defer teardown()
+
+	w.addressBuffersMu.Lock()
+	extXpub := w.addressBuffers[0].albExternal.branchXpub
+	w.addressBuffers[0].albExternal.lastUsed = 10
+	w.addressBuffers[0].albExternal.cursor = 15
+	w.addressBuffersMu.Unlock()
+
+	err := w.SyncLastReturnedAddress(ctx, 0, udb.ExternalBranch, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	w.addressBuffersMu.Lock()
+	cursor := w.addressBuffers[0].albExternal.cursor
+	w.addressBuffersMu.Unlock()
+	if cursor != 15 {
+		t.Fatalf("external cursor after syncing child 5 below lastUsed 10: got %d, "+
+			"want 15 (unchanged)", cursor)
+	}
+
+	// The next address is still the one the cursor points at.
+	addr, err := w.NewExternalAddress(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := deriveChildAddress(extXpub, 26, w.chainParams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addr.String() != want.String() {
+		t.Fatalf("next address after syncing child 5: got %v, want child 26 (%v)",
+			addr, want)
+	}
+}
+
+// TestSyncLastReturnedAddressFreshBranchBackwardSync verifies that the
+// forward-only check covers a fresh branch too. After five getnewaddress
+// calls the cursor is 5, and syncing child 2 computes next =
+// 2 - ^uint32(0) == 3, below the cursor: taking it would make the next
+// address child 3, already handed out.
+func TestSyncLastReturnedAddressFreshBranchBackwardSync(t *testing.T) {
+	ctx := context.Background()
+	cfg := basicWalletConfig
+	w, teardown := testWallet(ctx, t, &cfg, nil)
+	defer teardown()
+
+	w.addressBuffersMu.Lock()
+	extXpub := w.addressBuffers[0].albExternal.branchXpub
+	lastUsed := w.addressBuffers[0].albExternal.lastUsed
+	w.addressBuffersMu.Unlock()
+	if lastUsed != ^uint32(0) {
+		t.Fatalf("premise: a fresh external branch has lastUsed ^uint32(0), got %d",
+			lastUsed)
+	}
+
+	for i := 0; i < 5; i++ {
+		if _, err := w.NewExternalAddress(ctx, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := w.SyncLastReturnedAddress(ctx, 0, udb.ExternalBranch, 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	addr, err := w.NewExternalAddress(ctx, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := deriveChildAddress(extXpub, 5, w.chainParams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if addr.String() != want.String() {
+		t.Fatalf("next address after syncing child 2: got %v, want child 5 (%v), "+
+			"not child 3 which was already handed out", addr, want)
+	}
+}
