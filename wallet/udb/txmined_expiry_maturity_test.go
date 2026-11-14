@@ -167,30 +167,43 @@ func testExpiryCreditMaturityInCoinSelection(t *testing.T, ct cointype.CoinType)
 		t.Fatal(err)
 	}
 
-	// Extend the main chain past coinbase maturity.
+	// Extend the main chain in three stages around coinbase maturity.  The
+	// credit is mined at height 1 and matures once CoinbaseMaturity blocks
+	// sit over it (curHeight-1 > CoinbaseMaturity): at tip CoinbaseMaturity
+	// it is one block short and still immature, at tip CoinbaseMaturity+1
+	// it crosses the boundary, and it stays spendable past it.
 	maturity := int32(s.chainParams.CoinbaseMaturity)
-	tipHeight := 1 + maturity + 5
-	nBlocks := tipHeight - 1
-	blocks := make([]*wire.BlockHeader, 0, nBlocks)
-	for i := int32(0); i < nBlocks; i++ {
-		blocks = append(blocks, g.generate(dcrutil.BlockValid))
+	extend := func(n, tip int32, stage string, matured bool) error {
+		blocks := make([]*wire.BlockHeader, 0, n)
+		for i := int32(0); i < n; i++ {
+			blocks = append(blocks, g.generate(dcrutil.BlockValid))
+		}
+		err := walletdb.Update(ctx, db, func(dbtx walletdb.ReadWriteTx) error {
+			return insertMainChainHeaders(s, dbtx, makeHeaderDataSlice(blocks...),
+				emptyFilters(int(n)))
+		})
+		if err != nil {
+			return err
+		}
+		return walletdb.View(ctx, db, func(dbtx walletdb.ReadTx) error {
+			want := 0
+			if matured {
+				want = 1
+			}
+			if got := selectedInputs(dbtx, tip); got != want {
+				t.Errorf("%s expiry credit (%s): selected %d inputs, want %d",
+					stage, ct, got, want)
+			}
+			return checkBalances(stage, !matured)(dbtx)
+		})
 	}
-	err = walletdb.Update(ctx, db, func(dbtx walletdb.ReadWriteTx) error {
-		return insertMainChainHeaders(s, dbtx, makeHeaderDataSlice(blocks...),
-			emptyFilters(int(nBlocks)))
-	})
-	if err != nil {
+	if err := extend(maturity-1, maturity, "one block before maturity", false); err != nil {
 		t.Fatal(err)
 	}
-
-	// Matured: the same credit is selected and reported spendable.
-	err = walletdb.View(ctx, db, func(dbtx walletdb.ReadTx) error {
-		if n := selectedInputs(dbtx, tipHeight); n != 1 {
-			t.Errorf("matured expiry credit (%s): selected %d inputs, want 1", ct, n)
-		}
-		return checkBalances("matured", false)(dbtx)
-	})
-	if err != nil {
+	if err := extend(1, maturity+1, "at CoinbaseMaturity", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := extend(4, maturity+5, "past CoinbaseMaturity", true); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -252,6 +265,115 @@ func testUnminedExpiryCreditNotSelectable(t *testing.T, ct cointype.CoinType) {
 		if bal.SKASpendable.Cmp(cointype.Zero()) != 0 {
 			t.Errorf("unmined expiry credit (%s): SKA spendable %v at minconf 0, "+
 				"want 0", ct, bal.SKASpendable)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestUnminedExpirySkipSelectsFollowingCredits checks that skipping an
+// unmined expiry credit in the minconf-0 input source continues the scan
+// instead of ending it.  The minconf-0 keys are shuffled per input source,
+// so the fixture holds two unmined credits without an expiry besides the
+// expiry credit and selects eight times: a break at the expiry credit
+// selects fewer than both plain credits in every round except the one
+// shuffle that puts the expiry credit last.
+func TestUnminedExpirySkipSelectsFollowingCredits(t *testing.T) {
+	for _, tc := range expiryMaturityCases {
+		t.Run(tc.coinType.String(), func(t *testing.T) {
+			testUnminedExpirySkipSelectsFollowingCredits(t, tc.coinType)
+		})
+	}
+}
+
+func testUnminedExpirySkipSelectsFollowingCredits(t *testing.T, ct cointype.CoinType) {
+	ctx := context.Background()
+	db, _, s, teardown, err := cloneDB(ctx, "unmined_expiry_skip_"+ct.String()+".kv")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer teardown()
+
+	addr, err := stdaddr.NewAddressPubKeyHashEcdsaSecp256k1V0(make([]byte, 20), s.chainParams)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, pkScript := addr.PaymentScript()
+	newRec := func(inputByte byte, withExpiry bool, v int64) *TxRecord {
+		tx := wire.NewMsgTx()
+		if withExpiry {
+			tx.Expiry = 100
+		}
+		// A distinct external input per transaction: the unconfirmed store
+		// treats two unmined transactions sharing an input as conflicting
+		// double spends.
+		tx.AddTxIn(wire.NewTxIn(wire.NewOutPoint(&chainhash.Hash{inputByte}, 0,
+			wire.TxTreeRegular), 0, nil))
+		if ct.IsSKA() {
+			tx.AddTxOut(wire.NewTxOutSKA(big.NewInt(v), ct, pkScript))
+		} else {
+			tx.AddTxOut(wire.NewTxOut(v, pkScript))
+		}
+		rec, err := NewTxRecordFromMsgTx(tx, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return rec
+	}
+
+	expiryRec := newRec(1, true, 1e8)
+	goodA := newRec(2, false, 2e8)
+	goodB := newRec(3, false, 3e8)
+
+	err = walletdb.Update(ctx, db, func(dbtx walletdb.ReadWriteTx) error {
+		for _, rec := range []*TxRecord{expiryRec, goodA, goodB} {
+			if err := s.InsertMemPoolTx(dbtx, rec); err != nil {
+				return err
+			}
+			if err := s.AddCredit(dbtx, rec, nil, 0, false, 0); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = walletdb.View(ctx, db, func(dbtx walletdb.ReadTx) error {
+		_, syncHeight := s.MainChainTip(dbtx)
+		// Each input source shuffles the minconf-0 keys, so select several
+		// times: a break at the expiry credit only escapes when the shuffle
+		// puts it last, and eight rounds make that escape practically
+		// impossible.
+		for round := 0; round < 8; round++ {
+			src := s.MakeInputSourceWithCoinType(dbtx, 0, 0, syncHeight, nil, ct)
+			detail, err := src.SelectInputs(0, cointype.Zero())
+			if err != nil {
+				return err
+			}
+			if len(detail.Inputs) != 2 {
+				t.Errorf("round %d: unmined credits (%s): selected %d inputs, want "+
+					"the 2 plain credits (a break at the expiry credit would "+
+					"select fewer)", round, ct, len(detail.Inputs))
+				return nil
+			}
+			selected := make(map[chainhash.Hash]bool, len(detail.Inputs))
+			for _, in := range detail.Inputs {
+				selected[in.PreviousOutPoint.Hash] = true
+			}
+			for _, rec := range []*TxRecord{goodA, goodB} {
+				if !selected[rec.Hash] {
+					t.Errorf("round %d: unmined plain credit %v (%s) not selected",
+						round, &rec.Hash, ct)
+				}
+			}
+			if selected[expiryRec.Hash] {
+				t.Errorf("round %d: unmined expiry credit %v (%s) selected",
+					round, &expiryRec.Hash, ct)
+			}
 		}
 		return nil
 	})
